@@ -4,20 +4,36 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .ai_analyzer import DEFAULT_MODEL, SUPPORTED_MODELS
 from .drive_utils import COLAB_DRIVE_ROOT
-from .pipeline import summarize_video
+from .pipeline import summarize_directory, summarize_video
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="acortador",
-        description="Resume un video de Google Drive en un clip <= 10 minutos con sus ideas principales.",
+        description="Resume uno o todos los videos de un directorio de Google Drive en clips <= 10 minutos.",
     )
     parser.add_argument(
         "--source",
         help="Ruta del video en Drive/local o enlace compartido de Google Drive.",
+    )
+    parser.add_argument(
+        "--dir",
+        dest="source_dir",
+        help="Directorio en Drive o local para resumir todos sus videos en lote.",
+    )
+    parser.add_argument(
+        "--no-recursive",
+        action="store_true",
+        help="No buscar videos en subcarpetas al procesar un directorio con --dir.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Regenerar resúmenes aunque ya exista '<nombre>_resumen.mp4' en un lote.",
     )
     parser.add_argument(
         "--output",
@@ -83,8 +99,39 @@ def main(argv: list[str] | None = None) -> int:
         launch_app(share=not args.no_share, default_drive_dir=args.drive_dir)
         return 0
 
-    if not args.source:
-        parser.error("Debes especificar --source o usar --ui.")
+    if not args.source and not args.source_dir:
+        parser.error("Debes especificar --source, --dir o usar --ui.")
+
+    target_dir = args.source_dir
+    if not target_dir and args.source and Path(args.source).expanduser().is_dir():
+        target_dir = args.source
+
+    if target_dir:
+        batch = summarize_directory(
+            directory=target_dir,
+            output_dir=args.output_dir,
+            recursive=not args.no_recursive,
+            max_duration_minutes=args.max_minutes,
+            engine=args.engine,
+            model=args.model,
+            language=args.language,
+            focus_instructions=args.focus,
+            skip_existing=not args.overwrite,
+            continue_on_error=True,
+            progress_callback=lambda msg: print(f"[acortador] {msg}"),
+        )
+        print(
+            f"Lote completado: {batch.succeeded_count} procesado(s), "
+            f"{batch.skipped_count} omitido(s), {batch.failed_count} error(es)."
+        )
+        for res in batch.results:
+            print(
+                f" - {res.output_video_path} "
+                f"({res.summary_duration:.1f} s / original: {res.source_duration:.1f} s)"
+            )
+        for failure in batch.failures:
+            print(f" - ERROR {failure.source_path}: {failure.error}", file=sys.stderr)
+        return 1 if batch.failed_count > 0 else 0
 
     result = summarize_video(
         source=args.source,

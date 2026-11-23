@@ -22,8 +22,8 @@ Funciona con dos motores de IA:
 3. Ejecuta la celda 2: La API key es **opcional**. Puedes dejarla vacía para usar el motor local gratuito.
 4. Ejecuta la celda 3 para descargar y sincronizar automáticamente en 1 segundo los últimos cambios desde GitHub hacia `/content/acortador` (si ya tienes una sesión activa de Colab, basta con re-ejecutar esta celda para actualizar sin recargar ni resubir archivos).
 5. Elige cómo trabajar:
-   - **Modo A (Celda 4A):** interfaz web **Gradio** con explorador de carpetas de Drive, selector de motor (`Local (100% Gratis, sin API keys)` vs `Gemini Cloud`), deslizador de duración (1–10 min) y descarga/previsualización directa.
-   - **Modo B (Celda 4B):** formulario nativo `#@param` con ruta en Drive o enlace compartido de Google Drive, seleccionando `motor_ia = "local"`.
+   - **Modo A (Celda 4A):** interfaz web **Gradio** con selector de directorio en Drive, lista dinámica con selección múltiple de videos del directorio (excluye `*_resumen.mp4` previos), selector de motor (`Local (100% Gratis, sin API keys)` vs `Gemini Cloud`), deslizador de duración (1–10 min), omisión de ya resumidos y descarga/vista previa por lote.
+   - **Modo B (Celda 4B):** formulario nativo `#@param` que acepta tanto un directorio completo en Drive (procesamiento por lote) como un video individual o enlace compartido de Google Drive, seleccionando `motor_ia = "local"`.
 
 ## Uso local (CLI o interfaz web)
 
@@ -32,7 +32,10 @@ Requiere Python 3.10+ y `ffmpeg` / `ffprobe` en `PATH`:
 ```bash
 pip install -r requirements.txt
 
-# Resumen 100% gratis con motor local (Whisper + TextRank):
+# Resumen de un directorio completo en lote (Whisper + TextRank):
+python -m acortador --dir "./videos" --engine local --max-minutes 10
+
+# Resumen de un video desde ruta local o enlace de Google Drive:
 python -m acortador --source "https://drive.google.com/file/d/TU_FILE_ID/view" --engine local --max-minutes 10
 
 # O usando Gemini si tienes API key configurada:

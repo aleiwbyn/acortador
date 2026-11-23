@@ -82,6 +82,37 @@ class SummaryResult:
     used_proxy: bool
 
 
+@dataclass(frozen=True, slots=True)
+class BatchItemFailure:
+    """Error registrado al procesar un video individual dentro de un lote."""
+
+    source_path: Path
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class BatchSummaryResult:
+    """Resultado consolidado del procesamiento por lote de múltiples videos."""
+
+    source_dir: Path | None
+    total_videos: int
+    results: list[SummaryResult]
+    skipped: list[Path]
+    failures: list[BatchItemFailure]
+
+    @property
+    def succeeded_count(self) -> int:
+        return len(self.results)
+
+    @property
+    def skipped_count(self) -> int:
+        return len(self.skipped)
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failures)
+
+
 def parse_timestamp(value: str | float) -> float:
     """Convierte 'HH:MM:SS(.ms)', 'MM:SS(.ms)' o segundos numéricos a segundos."""
     if isinstance(value, bool):

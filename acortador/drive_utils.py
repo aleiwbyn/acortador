@@ -25,11 +25,93 @@ SUPPORTED_VIDEO_EXTENSIONS = {
 
 _DRIVE_FILE_PATH_RE = re.compile(r"/file/d/([a-zA-Z0-9_-]{10,})")
 _DRIVE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{10,}$")
+_GENERATED_SUMMARY_SUFFIXES = ("_resumen", "_resumen_ia")
+_EXCLUDED_SUBDIRS = {"__pycache__", "node_modules"}
 
 
 def is_drive_mounted(drive_root: Path = COLAB_DRIVE_ROOT) -> bool:
     """Indica si la carpeta raíz de Google Drive está disponible localmente."""
     return drive_root.exists() and drive_root.is_dir()
+
+
+def is_generated_summary_file(path: Path) -> bool:
+    """Indica si un archivo corresponde a un resumen generado previamente."""
+    return path.stem.lower().endswith(_GENERATED_SUMMARY_SUFFIXES)
+
+
+def _unicode_variants(raw_path: str) -> list[str]:
+    variants = [raw_path]
+    nfc = unicodedata.normalize("NFC", raw_path)
+    nfd = unicodedata.normalize("NFD", raw_path)
+    if nfc not in variants:
+        variants.append(nfc)
+    if nfd not in variants:
+        variants.append(nfd)
+    return variants
+
+
+def resolve_directory_source(
+    folder: str | Path,
+    drive_root: Path = COLAB_DRIVE_ROOT,
+) -> Path:
+    """Resuelve una carpeta local o relativa a Google Drive con soporte Unicode NFC/NFD."""
+    cleaned = str(folder).strip().strip('"').strip("'")
+    if not cleaned:
+        raise ValueError("Debes proporcionar una ruta de carpeta válida.")
+
+    for variant in _unicode_variants(cleaned):
+        candidate = Path(variant).expanduser()
+        if candidate.is_dir():
+            return candidate.resolve()
+
+        if not candidate.is_absolute():
+            drive_candidate = drive_root / variant.lstrip("/\\")
+            if drive_candidate.is_dir():
+                return drive_candidate.resolve()
+
+    mounted_hint = (
+        f"Drive montado en {drive_root}."
+        if is_drive_mounted(drive_root)
+        else f"Drive no está montado en {drive_root}."
+    )
+    raise FileNotFoundError(f"No se encontró el directorio: {cleaned}. {mounted_hint}")
+
+
+def list_drive_subfolders(
+    root_folder: str | Path,
+    max_depth: int = 3,
+    max_results: int = 200,
+) -> list[Path]:
+    """Lista la carpeta raíz y sus subcarpetas visibles hasta max_depth niveles."""
+    direct = Path(root_folder).expanduser()
+    if direct.is_dir():
+        root = direct
+    else:
+        try:
+            root = resolve_directory_source(root_folder)
+        except (ValueError, FileNotFoundError):
+            return []
+
+    if max_results <= 0:
+        return []
+
+    subdirs: list[Path] = []
+    for dirpath, dirnames, _filenames in os.walk(root):
+        current = Path(dirpath)
+        depth = len(current.relative_to(root).parts)
+        if depth >= max_depth:
+            dirnames[:] = []
+            continue
+
+        dirnames[:] = sorted(
+            d for d in dirnames if not d.startswith(".") and d not in _EXCLUDED_SUBDIRS
+        )
+        for dirname in dirnames:
+            subdirs.append(current / dirname)
+            if len(subdirs) >= max_results - 1:
+                return [root, *sorted(subdirs, key=lambda p: p.as_posix().lower())]
+
+    return [root, *sorted(subdirs, key=lambda p: p.as_posix().lower())]
 
 
 def extract_drive_file_id(source: str) -> str | None:
@@ -58,11 +140,17 @@ def list_drive_videos(
     folder: str | Path,
     recursive: bool = True,
     max_results: int = 200,
+    exclude_summaries: bool = True,
 ) -> list[Path]:
     """Lista archivos de video soportados dentro de una carpeta de Drive."""
-    root = Path(folder).expanduser()
-    if not root.exists() or not root.is_dir():
-        return []
+    direct = Path(folder).expanduser()
+    if direct.exists() and direct.is_dir():
+        root = direct
+    else:
+        try:
+            root = resolve_directory_source(folder)
+        except (ValueError, FileNotFoundError):
+            return []
 
     found: list[Path] = []
     if recursive:
@@ -72,18 +160,24 @@ def list_drive_videos(
                 if filename.startswith("."):
                     continue
                 candidate = Path(dirpath) / filename
-                if candidate.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
-                    found.append(candidate)
-                    if len(found) >= max_results:
-                        return sorted(found, key=lambda p: p.as_posix().lower())
+                if candidate.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+                    continue
+                if exclude_summaries and is_generated_summary_file(candidate):
+                    continue
+                found.append(candidate)
+                if len(found) >= max_results:
+                    return sorted(found, key=lambda p: p.as_posix().lower())
     else:
         for candidate in sorted(root.iterdir(), key=lambda p: p.name.lower()):
             if candidate.name.startswith(".") or not candidate.is_file():
                 continue
-            if candidate.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
-                found.append(candidate)
-                if len(found) >= max_results:
-                    break
+            if candidate.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+                continue
+            if exclude_summaries and is_generated_summary_file(candidate):
+                continue
+            found.append(candidate)
+            if len(found) >= max_results:
+                break
 
     return sorted(found, key=lambda p: p.as_posix().lower())
 

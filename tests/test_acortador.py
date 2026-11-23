@@ -12,12 +12,19 @@ from typing import Any
 
 import pytest
 
-from acortador import MAX_ALLOWED_DURATION_SEC, summarize_video
+from acortador import (
+    MAX_ALLOWED_DURATION_SEC,
+    format_batch_markdown_report,
+    summarize_directory,
+    summarize_video,
+)
 from acortador.ai_analyzer import analyze_video_with_gemini
 from acortador.drive_utils import (
     default_output_path,
     extract_drive_file_id,
+    list_drive_subfolders,
     list_drive_videos,
+    resolve_directory_source,
     resolve_video_source,
 )
 from acortador.local_analyzer import (
@@ -758,6 +765,149 @@ def test_preload_cuda_libraries_loads_discovered_cublas(
 
     assert _preload_cuda_libraries() is True
     assert loaded_calls == [(str(cublas_file), 256)]
+
+
+def test_drive_utils_subfolders_and_exclude_summaries(tmp_path: Path) -> None:
+    drive_root = tmp_path / "MyDrive"
+    curso = drive_root / "Curso IA"
+    modulo = curso / "Módulo 1"
+    hidden = curso / ".cache"
+    pycache = curso / "__pycache__"
+    for folder in (modulo, hidden, pycache):
+        folder.mkdir(parents=True)
+
+    orig = curso / "charla.mp4"
+    res1 = curso / "charla_resumen.mp4"
+    res2 = modulo / "clase_resumen_ia.mp4"
+    sub_vid = modulo / "clase.mp4"
+    for f in (orig, res1, res2, sub_vid):
+        f.write_bytes(b"video")
+
+    assert list_drive_videos(curso, recursive=True, exclude_summaries=True) == [orig, sub_vid]
+    assert list_drive_videos(curso, recursive=True, exclude_summaries=False) == sorted(
+        [orig, res1, res2, sub_vid], key=lambda p: p.as_posix().lower()
+    )
+
+    subfolders = list_drive_subfolders(drive_root, max_depth=3)
+    assert drive_root in subfolders
+    assert curso in subfolders
+    assert modulo in subfolders
+    assert hidden not in subfolders
+    assert pycache not in subfolders
+
+    resolved = resolve_directory_source("Curso IA", drive_root=drive_root)
+    assert resolved == curso.resolve()
+
+
+def test_summarize_directory_batch_skip_and_error_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src_dir = tmp_path / "videos_lote"
+    sub_dir = src_dir / "sub"
+    out_dir = tmp_path / "salidas"
+    sub_dir.mkdir(parents=True)
+    out_dir.mkdir(parents=True)
+
+    v1 = src_dir / "v1.mp4"
+    v2 = sub_dir / "v2.mp4"
+    v3_bad = sub_dir / "v3_bad.mp4"
+    for f in (v1, v2, v3_bad):
+        f.write_bytes(b"source")
+
+    existing_v1_summary = out_dir / "v1_resumen.mp4"
+    existing_v1_summary.write_bytes(b"existing-summary")
+
+    monkeypatch.setattr("acortador.pipeline.ensure_ffmpeg_available", lambda: None)
+
+    processed_calls: list[tuple[Path, Path | None]] = []
+
+    def fake_summarize(
+        source: str,
+        output_dir: str | Path | None = None,
+        **kwargs: Any,
+    ) -> SummaryResult:
+        src_path = Path(source)
+        out_path_dir = Path(output_dir) if output_dir is not None else src_path.parent
+        processed_calls.append((src_path, out_path_dir))
+        if src_path.name == "v3_bad.mp4":
+            raise RuntimeError("archivo dañado")
+
+        return SummaryResult(
+            source_path=src_path,
+            output_video_path=out_path_dir / f"{src_path.stem}_resumen.mp4",
+            summary_md_path=out_path_dir / f"{src_path.stem}_resumen.md",
+            subtitles_srt_path=out_path_dir / f"{src_path.stem}_resumen.srt",
+            source_duration=600.0,
+            summary_duration=180.0,
+            video_title=f"Resumen {src_path.stem}",
+            executive_summary="Resumen ejecutivo del video.",
+            main_ideas=["Idea principal 1"],
+            segments=[NormalizedSegment(start=0.0, end=180.0, title="Bloque", key_idea="Idea", importance=5)],
+            model_used="whisper-local-nlp",
+            used_proxy=False,
+        )
+
+    monkeypatch.setattr("acortador.pipeline.summarize_video", fake_summarize)
+
+    batch = summarize_directory(
+        directory=src_dir,
+        output_dir=out_dir,
+        recursive=True,
+        skip_existing=True,
+        continue_on_error=True,
+    )
+
+    assert batch.total_videos == 3
+    assert batch.skipped == [v1]
+    assert batch.skipped_count == 1
+    assert batch.succeeded_count == 1
+    assert batch.failed_count == 1
+    assert batch.results[0].output_video_path == out_dir / "sub" / "v2_resumen.mp4"
+    assert batch.failures[0].source_path == v3_bad
+    assert "archivo dañado" in batch.failures[0].error
+    assert processed_calls == [(v2, out_dir / "sub"), (v3_bad, out_dir / "sub")]
+
+    report = format_batch_markdown_report(batch)
+    assert "Completado" in report
+    assert "Omitido (ya existía)" in report
+    assert "Error" in report
+    assert "v2.mp4" in report
+
+
+def test_ui_directory_video_choices_and_batch_progress(tmp_path: Path) -> None:
+    from acortador.ui import _build_video_choices, _estimate_batch_progress
+
+    folder = tmp_path / "clase"
+    (folder / "tema1").mkdir(parents=True)
+    v1 = folder / "intro.mp4"
+    v2 = folder / "tema1" / "parte2.mp4"
+    v2_old = folder / "tema1" / "parte2_resumen.mp4"
+    for f in (v1, v2, v2_old):
+        f.write_bytes(b"video")
+
+    choices_rec, selected_rec, status_rec = _build_video_choices(str(folder), recursive=True)
+    assert choices_rec == [("intro.mp4", str(v1)), ("tema1/parte2.mp4", str(v2))]
+    assert selected_rec == [str(v1), str(v2)]
+    assert "2 video(s)" in status_rec
+
+    choices_flat, selected_flat, _ = _build_video_choices(str(folder), recursive=False)
+    assert choices_flat == [("intro.mp4", str(v1))]
+    assert selected_flat == [str(v1)]
+
+    progress = _estimate_batch_progress("[2/4] clase.mp4 — Transcribiendo discurso...")
+    assert 0.25 < progress < 0.50
+
+
+def test_cli_parser_batch_directory() -> None:
+    from acortador.__main__ import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["--dir", "/content/drive/MyDrive/Clases", "--no-recursive", "--overwrite"])
+    assert args.source_dir == "/content/drive/MyDrive/Clases"
+    assert args.no_recursive is True
+    assert args.overwrite is True
+
 
 
 

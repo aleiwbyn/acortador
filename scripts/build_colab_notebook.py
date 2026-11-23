@@ -59,7 +59,7 @@ def build_notebook_dict(package_dir: Path = PACKAGE_DIR) -> dict[str, Any]:
     cell_1_intro = """
 # Resumidor de Video con IA (máximo 10 minutos) — Google Drive + Google Colab
 
-Esta aplicación toma un **video fuente alojado en tu Google Drive**, extrae sus **ideas principales** respetando un presupuesto estricto de **≤ 10 minutos (600 s)** y genera en tu Drive:
+Esta aplicación toma uno o todos los videos de un **directorio seleccionado en Google Drive**, extrae sus **ideas principales** respetando un presupuesto estricto de **≤ 10 minutos (600 s) por video** y genera en tu Drive:
 
 - `<nombre>_resumen.mp4`: video resumido ensamblado con `ffmpeg`.
 - `<nombre>_resumen.md`: resumen ejecutivo, ideas principales y tabla de timestamps.
@@ -73,7 +73,7 @@ Esta aplicación toma un **video fuente alojado en tu Google Drive**, extrae sus
 1. Ejecuta la **Celda 1** para montar Google Drive e instalar dependencias.
 2. Ejecuta la **Celda 2** (opcional: solo si usarás Gemini en la nube).
 3. Ejecuta la **Celda 3** para inicializar y **sincronizar automáticamente el código más reciente desde GitHub** (tarda 1 segundo, sin tener que resubir el notebook).
-4. Elige **Modo A (Interfaz Web Gradio)** en la Celda 4A o **Modo B (Formulario Colab)** en la Celda 4B.
+4. Elige **Modo A (Interfaz Web Gradio)** en la Celda 4A (con selector de directorio y lista de videos en lote) o **Modo B (Formulario Colab)** en la Celda 4B.
 """
 
     cell_2_setup = """
@@ -215,12 +215,19 @@ launch_app(share=True, default_drive_dir="/content/drive/MyDrive")
 """
 
     cell_6_form = """
-#@title 4B. Modo B — Ejecución directa con Formulario Colab
+#@title 4B. Modo B — Ejecución directa con Formulario Colab (Video o Directorio completo)
 from pathlib import Path
 from IPython.display import Markdown, Video, display
-from acortador import summarize_video
+from acortador import (
+    format_batch_markdown_report,
+    summarize_directory,
+    summarize_video,
+)
+from acortador.drive_utils import extract_drive_file_id, resolve_directory_source
 
-video_fuente = "/content/drive/MyDrive/mi_video.mp4"  #@param {type:"string"}
+origen_o_carpeta = "/content/drive/MyDrive"  #@param {type:"string"}
+incluir_subcarpetas = True  #@param {type:"boolean"}
+omitir_ya_resumidos = True  #@param {type:"boolean"}
 motor_ia = "local"  #@param ["local", "gemini"]
 carpeta_salida = ""  #@param {type:"string"}
 duracion_maxima_min = 10.0  #@param {type:"slider", min:1, max:10, step:0.5}
@@ -228,22 +235,49 @@ modelo_gemini = "gemini-3.5-flash-lite"  #@param ["gemini-3.5-flash-lite", "gemi
 idioma = "es"  #@param ["es", "en", "pt", "fr"]
 enfoque_opcional = ""  #@param {type:"string"}
 
-resultado = summarize_video(
-    source=video_fuente,
-    output_dir=carpeta_salida.strip() or None,
-    max_duration_minutes=float(duracion_maxima_min),
-    engine=motor_ia,
-    model=modelo_gemini,
-    language=idioma,
-    focus_instructions=enfoque_opcional,
-    progress_callback=lambda msg: print(f"[acortador] {msg}"),
-)
+_es_directorio = False
+if extract_drive_file_id(origen_o_carpeta) is None:
+    try:
+        resolve_directory_source(origen_o_carpeta)
+        _es_directorio = True
+    except (ValueError, FileNotFoundError):
+        _es_directorio = False
 
-md_report = Path(resultado.summary_md_path).read_text(encoding="utf-8")
-display(Markdown(md_report))
+if _es_directorio:
+    lote = summarize_directory(
+        directory=origen_o_carpeta,
+        output_dir=carpeta_salida.strip() or None,
+        recursive=incluir_subcarpetas,
+        max_duration_minutes=float(duracion_maxima_min),
+        engine=motor_ia,
+        model=modelo_gemini,
+        language=idioma,
+        focus_instructions=enfoque_opcional,
+        skip_existing=omitir_ya_resumidos,
+        progress_callback=lambda msg: print(f"[acortador] {msg}"),
+    )
+    display(Markdown(format_batch_markdown_report(lote)))
+    if lote.results:
+        _primer_video = lote.results[0].output_video_path
+        embed_preview = _primer_video.stat().st_size <= 50 * 1024 * 1024
+        display(Video(str(_primer_video), embed=embed_preview))
+else:
+    resultado = summarize_video(
+        source=origen_o_carpeta,
+        output_dir=carpeta_salida.strip() or None,
+        max_duration_minutes=float(duracion_maxima_min),
+        engine=motor_ia,
+        model=modelo_gemini,
+        language=idioma,
+        focus_instructions=enfoque_opcional,
+        progress_callback=lambda msg: print(f"[acortador] {msg}"),
+    )
 
-embed_preview = resultado.output_video_path.stat().st_size <= 50 * 1024 * 1024
-display(Video(str(resultado.output_video_path), embed=embed_preview))
+    md_report = Path(resultado.summary_md_path).read_text(encoding="utf-8")
+    display(Markdown(md_report))
+
+    embed_preview = resultado.output_video_path.stat().st_size <= 50 * 1024 * 1024
+    display(Video(str(resultado.output_video_path), embed=embed_preview))
 """
 
     return {

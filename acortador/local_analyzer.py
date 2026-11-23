@@ -242,6 +242,9 @@ def _compute_textrank_scores(sentences: list[str]) -> list[float]:
     return [s / max_s for s in scores] if max_s > 0 else scores
 
 
+_WHISPER_MODEL_CACHE: dict[tuple[int, str, str, str], Any] = {}
+
+
 def _run_whisper_transcription(
     whisper_model_cls: Any,
     audio_path: Path,
@@ -251,31 +254,40 @@ def _run_whisper_transcription(
     compute_type: str,
     progress_callback: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Instancia Whisper y consume por completo el generador para capturar errores CUDA."""
-    model = whisper_model_cls(whisper_model_size, device=device, compute_type=compute_type)
+    """Instancia o reutiliza Whisper en caché y consume todo el generador."""
+    cache_key = (id(whisper_model_cls), whisper_model_size, device, compute_type)
+    model = _WHISPER_MODEL_CACHE.get(cache_key)
+    if model is None:
+        model = whisper_model_cls(whisper_model_size, device=device, compute_type=compute_type)
+        _WHISPER_MODEL_CACHE[cache_key] = model
+
     _notify(
         progress_callback,
         f"Transcribiendo discurso ({device.upper()}/{compute_type}) y detectando marcas de tiempo...",
     )
-    segments_gen, _info = model.transcribe(
-        str(audio_path),
-        beam_size=3,
-        language=language if language and language != "auto" else None,
-        vad_filter=True,
-    )
+    try:
+        segments_gen, _info = model.transcribe(
+            str(audio_path),
+            beam_size=3,
+            language=language if language and language != "auto" else None,
+            vad_filter=True,
+        )
 
-    results: list[dict[str, Any]] = []
-    for s in segments_gen:
-        text = s.text.strip()
-        if text and s.end > s.start:
-            results.append(
-                {
-                    "start": round(float(s.start), 3),
-                    "end": round(float(s.end), 3),
-                    "text": text,
-                }
-            )
-    return results
+        results: list[dict[str, Any]] = []
+        for s in segments_gen:
+            text = s.text.strip()
+            if text and s.end > s.start:
+                results.append(
+                    {
+                        "start": round(float(s.start), 3),
+                        "end": round(float(s.end), 3),
+                        "text": text,
+                    }
+                )
+        return results
+    except (RuntimeError, OSError):
+        _WHISPER_MODEL_CACHE.pop(cache_key, None)
+        raise
 
 
 def transcribe_video_locally(
