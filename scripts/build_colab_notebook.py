@@ -99,6 +99,20 @@ subprocess.check_call(
     ]
 )
 
+if shutil.which("nvidia-smi") is not None:
+    try:
+        subprocess.check_call(
+            [
+                "pip",
+                "install",
+                "-q",
+                "nvidia-cublas-cu12",
+                "nvidia-cudnn-cu12==9.*",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"Aviso: no se pudieron instalar librerías CUDA 12 ({exc}); se usará fallback automático a CPU si hace falta.")
+
 if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
     print("Instalando ffmpeg...")
     subprocess.check_call(["apt-get", "update", "-qq"])
@@ -239,6 +253,7 @@ display(Video(str(resultado.output_video_path), embed=embed_preview))
             "colab": {
                 "name": OUTPUT_NOTEBOOK.name,
                 "provenance": [],
+                "gpuType": "T4",
             },
             "kernelspec": {
                 "display_name": "Python 3",
@@ -247,6 +262,7 @@ display(Video(str(resultado.output_video_path), embed=embed_preview))
             "language_info": {
                 "name": "python",
             },
+            "accelerator": "GPU",
         },
         "cells": [
             _markdown_cell("intro", cell_1_intro),

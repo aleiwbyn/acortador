@@ -23,7 +23,9 @@ from acortador.drive_utils import (
 from acortador.local_analyzer import (
     _compute_textrank_scores,
     _patch_av_open_metadata_errors,
+    _preload_cuda_libraries,
     build_local_summary_plan,
+    transcribe_video_locally,
 )
 from acortador.models import (
     NormalizedSegment,
@@ -678,5 +680,84 @@ def test_patch_av_open_metadata_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result == "ok"
     assert "metadata_errors" not in calls[0]
     assert calls[0]["mode"] == "r"
+
+
+def test_transcribe_video_locally_cuda_fallback_on_libcublas_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "demo.mp4"
+    video.write_bytes(b"video")
+    audio_tmp = tmp_path / "demo_audio_tmp.wav"
+
+    def fake_extract(video_path: Path, output_audio_path: Path) -> Path:
+        output_audio_path.write_bytes(b"wav")
+        return output_audio_path
+
+    monkeypatch.setattr("acortador.local_analyzer.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("acortador.local_analyzer._preload_cuda_libraries", lambda: False)
+
+    fake_torch = types.ModuleType("torch")
+    fake_cuda = types.SimpleNamespace(is_available=lambda: True)
+    fake_torch.cuda = fake_cuda  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    attempts: list[tuple[str, str]] = []
+
+    class FakeWhisperModel:
+        def __init__(self, size: str, device: str, compute_type: str) -> None:
+            self.device = device
+            attempts.append((device, compute_type))
+
+        def transcribe(self, *args: Any, **kwargs: Any) -> tuple[Any, Any]:
+            if self.device == "cuda":
+                def failing_gen() -> Any:
+                    if False:
+                        yield None
+                    raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+
+                return failing_gen(), None
+
+            def ok_gen() -> Any:
+                yield types.SimpleNamespace(start=1.0, end=12.5, text="Idea clave.")
+
+            return ok_gen(), None
+
+    fake_fw = types.ModuleType("faster_whisper")
+    fake_fw.WhisperModel = FakeWhisperModel  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+    messages: list[str] = []
+    results = transcribe_video_locally(video, progress_callback=messages.append)
+
+    assert attempts == [("cuda", "float16"), ("cpu", "int8")]
+    assert results == [{"start": 1.0, "end": 12.5, "text": "Idea clave."}]
+    assert any("CPU" in m for m in messages)
+    assert not audio_tmp.exists()
+
+
+def test_preload_cuda_libraries_loads_discovered_cublas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_lib_dir = tmp_path / "nvidia" / "cublas" / "lib"
+    fake_lib_dir.mkdir(parents=True)
+    cublas_file = fake_lib_dir / "libcublas.so.12"
+    cublas_file.write_bytes(b"elf")
+
+    monkeypatch.setattr("acortador.local_analyzer._discover_cuda_lib_dirs", lambda: [fake_lib_dir])
+    monkeypatch.setattr("acortador.local_analyzer.ctypes.RTLD_GLOBAL", 256, raising=False)
+
+    loaded_calls: list[tuple[str, int]] = []
+
+    def fake_cdll(path: str, mode: int = 0) -> object:
+        loaded_calls.append((path, mode))
+        return object()
+
+    monkeypatch.setattr("acortador.local_analyzer.ctypes.CDLL", fake_cdll)
+
+    assert _preload_cuda_libraries() is True
+    assert loaded_calls == [(str(cublas_file), 256)]
+
 
 

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import ctypes
+import importlib.util
 import math
 import os
 import re
+import site
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -104,6 +108,88 @@ def _patch_av_open_metadata_errors() -> None:
 _patch_av_open_metadata_errors()
 
 
+def _discover_cuda_lib_dirs() -> list[Path]:
+    """Localiza directorios que contienen librerías compartidas CUDA 12 / cuDNN."""
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        if path not in seen and path.is_dir():
+            seen.add(path)
+            candidates.append(path)
+
+    for pkg_name in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_runtime"):
+        with contextlib.suppress(ImportError, ValueError):
+            spec = importlib.util.find_spec(pkg_name)
+            if spec is not None and spec.submodule_search_locations:
+                for loc in spec.submodule_search_locations:
+                    _add(Path(loc) / "lib")
+
+    base_dirs: list[str] = []
+    with contextlib.suppress(AttributeError):
+        base_dirs.extend(site.getsitepackages())
+    with contextlib.suppress(AttributeError):
+        user_site = site.getusersitepackages()
+        if isinstance(user_site, str):
+            base_dirs.append(user_site)
+    base_dirs.extend(p for p in sys.path if p)
+
+    for base in base_dirs:
+        base_path = Path(base)
+        for sub in ("cublas", "cudnn", "cuda_runtime"):
+            _add(base_path / "nvidia" / sub / "lib")
+
+    if os.name != "nt":
+        _add(Path("/usr/local/cuda/lib64"))
+        _add(Path("/usr/local/cuda-12/lib64"))
+        usr_local = Path("/usr/local")
+        if usr_local.is_dir():
+            for cuda_dir in sorted(usr_local.glob("cuda-12*/lib64")):
+                _add(cuda_dir)
+        _add(Path("/usr/lib/x86_64-linux-gnu"))
+
+    return candidates
+
+
+def _preload_cuda_libraries() -> bool:
+    """Precarga librerías CUDA 12 / cuDNN con RTLD_GLOBAL para CTranslate2."""
+    lib_dirs = _discover_cuda_lib_dirs()
+    if os.name != "nt" and lib_dirs:
+        existing_ld = [p for p in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep) if p]
+        missing = [str(d) for d in lib_dirs if str(d) not in existing_ld]
+        if missing:
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([*missing, *existing_ld])
+
+    rtld_global = getattr(ctypes, "RTLD_GLOBAL", None)
+    if rtld_global is None:
+        return False
+
+    loaded_cublas = False
+    target_libs = (
+        "libcublasLt.so.12",
+        "libcublas.so.12",
+        "libcudnn.so.9",
+        "libcudnn_ops.so.9",
+        "libcudnn_cnn.so.9",
+    )
+    for lib_name in target_libs:
+        for lib_dir in lib_dirs:
+            candidate = lib_dir / lib_name
+            if candidate.is_file():
+                with contextlib.suppress(OSError):
+                    ctypes.CDLL(str(candidate), mode=rtld_global)
+                    if lib_name == "libcublas.so.12":
+                        loaded_cublas = True
+                    break
+
+    if not loaded_cublas:
+        with contextlib.suppress(OSError):
+            ctypes.CDLL("libcublas.so.12", mode=rtld_global)
+            loaded_cublas = True
+
+    return loaded_cublas
+
+
 def _compute_textrank_scores(sentences: list[str]) -> list[float]:
     """Calcula la importancia semántica relativa de cada frase con TextRank puro."""
     n = len(sentences)
@@ -156,13 +242,49 @@ def _compute_textrank_scores(sentences: list[str]) -> list[float]:
     return [s / max_s for s in scores] if max_s > 0 else scores
 
 
+def _run_whisper_transcription(
+    whisper_model_cls: Any,
+    audio_path: Path,
+    whisper_model_size: str,
+    language: str | None,
+    device: str,
+    compute_type: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Instancia Whisper y consume por completo el generador para capturar errores CUDA."""
+    model = whisper_model_cls(whisper_model_size, device=device, compute_type=compute_type)
+    _notify(
+        progress_callback,
+        f"Transcribiendo discurso ({device.upper()}/{compute_type}) y detectando marcas de tiempo...",
+    )
+    segments_gen, _info = model.transcribe(
+        str(audio_path),
+        beam_size=3,
+        language=language if language and language != "auto" else None,
+        vad_filter=True,
+    )
+
+    results: list[dict[str, Any]] = []
+    for s in segments_gen:
+        text = s.text.strip()
+        if text and s.end > s.start:
+            results.append(
+                {
+                    "start": round(float(s.start), 3),
+                    "end": round(float(s.end), 3),
+                    "text": text,
+                }
+            )
+    return results
+
+
 def transcribe_video_locally(
     video_path: Path,
     whisper_model_size: str = "base",
     language: str | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Transcribe el video localmente con faster-whisper (GPU o CPU, 100% gratis)."""
+    """Transcribe el video localmente con faster-whisper (GPU con fallback automático a CPU)."""
     _notify(progress_callback, "Extrayendo audio para transcripción local con IA...")
     audio_tmp = video_path.parent / f"{video_path.stem}_audio_tmp.wav"
     try:
@@ -181,36 +303,46 @@ def transcribe_video_locally(
         try:
             import torch  # type: ignore[import-not-found]
 
-            if torch.cuda.is_available():
-                device = "cuda"
-            else:
-                device = "cpu"
+            device = "cuda" if (device == "cuda" and torch.cuda.is_available()) else "cpu"
         except (ImportError, RuntimeError, OSError):
             device = "cpu"
 
-        compute_type = "float16" if device == "cuda" else "int8"
-        model = WhisperModel(whisper_model_size, device=device, compute_type=compute_type)
-
-        _notify(progress_callback, "Transcribiendo discurso y detectando marcas de tiempo exactas...")
-        segments_gen, _info = model.transcribe(
-            str(audio_tmp),
-            beam_size=3,
-            language=language if language and language != "auto" else None,
-            vad_filter=True,
-        )
-
-        results: list[dict[str, Any]] = []
-        for s in segments_gen:
-            text = s.text.strip()
-            if text and s.end > s.start:
-                results.append(
-                    {
-                        "start": round(float(s.start), 3),
-                        "end": round(float(s.end), 3),
-                        "text": text,
-                    }
+        if device == "cuda":
+            _preload_cuda_libraries()
+            try:
+                return _run_whisper_transcription(
+                    WhisperModel,
+                    audio_tmp,
+                    whisper_model_size,
+                    language,
+                    device="cuda",
+                    compute_type="float16",
+                    progress_callback=progress_callback,
                 )
-        return results
+            except (RuntimeError, OSError) as exc:
+                _notify(
+                    progress_callback,
+                    f"GPU CUDA no disponible ({exc}); cambiando automáticamente a CPU (int8)...",
+                )
+                return _run_whisper_transcription(
+                    WhisperModel,
+                    audio_tmp,
+                    whisper_model_size,
+                    language,
+                    device="cpu",
+                    compute_type="int8",
+                    progress_callback=progress_callback,
+                )
+
+        return _run_whisper_transcription(
+            WhisperModel,
+            audio_tmp,
+            whisper_model_size,
+            language,
+            device="cpu",
+            compute_type="int8",
+            progress_callback=progress_callback,
+        )
     finally:
         if audio_tmp.exists():
             with contextlib.suppress(OSError):
