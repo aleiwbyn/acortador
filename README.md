@@ -1,5 +1,7 @@
 # Resumidor de Video con IA (≤ 10 minutos) para Google Drive + Google Colab
 
+[![Abrir en Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aleiwbyn/acortador/blob/main/colab/resumidor_video_ia.ipynb)
+
 Aplicación modular en Python que analiza un video fuente alojado en Google Drive, extrae sus ideas principales y construye con `ffmpeg` un video resumido que **nunca excede los 10 minutos (600 s)**, junto con un reporte Markdown y subtítulos `.srt`.
 
 Funciona con dos motores de IA:
@@ -12,12 +14,13 @@ Funciona con dos motores de IA:
 - `<nombre>_resumen.md`: resumen ejecutivo, lista numerada de ideas principales y tabla de timestamps (original vs. resumen).
 - `<nombre>_resumen.srt`: subtítulos sincronizados con la línea de tiempo del resumen.
 
-## Uso rápido en Google Colab (Recomendado - Sin API Keys)
+## Uso rápido en Google Colab (Recomendado - Sin API Keys y con sincronización automática)
 
-1. Sube el archivo autocontenido [colab/resumidor_video_ia.ipynb](colab/resumidor_video_ia.ipynb) a Google Colab.
-2. Ejecuta la celda 1 para montar tu **Google Drive** (`/content/drive/MyDrive`) e instalar dependencias (`faster-whisper`, `ffmpeg`, `gradio`, `gdown`, etc.).
-3. Ejecuta la celda 2: La API key ahora es **opcional**. Puedes simplemente dejarla vacía para usar el motor local gratuito.
-4. Ejecuta la celda 3 para desplegar el paquete `acortador/` automáticamente en `/content/acortador`.
+1. Haz clic en el enlace directo para abrir siempre la versión más reciente desde GitHub:
+   https://colab.research.google.com/github/aleiwbyn/acortador/blob/main/colab/resumidor_video_ia.ipynb
+2. Ejecuta la celda 1 para montar tu **Google Drive** (`/content/drive/MyDrive`) e instalar dependencias (`faster-whisper`, `av<18.0.0`, `ffmpeg`, `gradio`, `gdown`, etc.).
+3. Ejecuta la celda 2: La API key es **opcional**. Puedes dejarla vacía para usar el motor local gratuito.
+4. Ejecuta la celda 3 para descargar y sincronizar automáticamente en 1 segundo los últimos cambios desde GitHub hacia `/content/acortador` (si ya tienes una sesión activa de Colab, basta con re-ejecutar esta celda para actualizar sin recargar ni resubir archivos).
 5. Elige cómo trabajar:
    - **Modo A (Celda 4A):** interfaz web **Gradio** con explorador de carpetas de Drive, selector de motor (`Local (100% Gratis, sin API keys)` vs `Gemini Cloud`), deslizador de duración (1–10 min) y descarga/previsualización directa.
    - **Modo B (Celda 4B):** formulario nativo `#@param` con ruta en Drive o enlace compartido de Google Drive, seleccionando `motor_ia = "local"`.

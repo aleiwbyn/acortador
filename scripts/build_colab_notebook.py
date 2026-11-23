@@ -59,17 +59,21 @@ def build_notebook_dict(package_dir: Path = PACKAGE_DIR) -> dict[str, Any]:
     cell_1_intro = """
 # Resumidor de Video con IA (máximo 10 minutos) — Google Drive + Google Colab
 
-Esta aplicación toma un **video fuente alojado en tu Google Drive**, lo analiza multimodalmente con **Gemini** (audio, discurso, texto en pantalla y escena visual), selecciona las **ideas principales** respetando un presupuesto estricto de **≤ 10 minutos (600 s)** y genera en tu Drive:
+Esta aplicación toma un **video fuente alojado en tu Google Drive**, extrae sus **ideas principales** respetando un presupuesto estricto de **≤ 10 minutos (600 s)** y genera en tu Drive:
 
 - `<nombre>_resumen.mp4`: video resumido ensamblado con `ffmpeg`.
 - `<nombre>_resumen.md`: resumen ejecutivo, ideas principales y tabla de timestamps.
 - `<nombre>_resumen.srt`: subtítulos alineados a la nueva línea de tiempo.
 
-### Flujo de uso
-1. Ejecuta la **Celda 2** para montar Google Drive e instalar dependencias.
-2. Ejecuta la **Celda 3** para configurar tu `GEMINI_API_KEY` (recomendado: Secretos de Colab).
-3. Ejecuta la **Celda 4** para inicializar el motor `acortador/` en el entorno Colab.
-4. Elige **Modo A (Interfaz Web Gradio)** en la Celda 5 o **Modo B (Formulario Colab)** en la Celda 6.
+### Motores disponibles
+- **Motor Local (por defecto, 100% gratis, sin API keys):** usa `faster-whisper` + `TextRank` directamente en Colab.
+- **Motor Gemini Cloud (opcional):** análisis audiovisual multimodal con Gemini si configuras tu `GEMINI_API_KEY`.
+
+### Flujo de uso y sincronización automática
+1. Ejecuta la **Celda 1** para montar Google Drive e instalar dependencias.
+2. Ejecuta la **Celda 2** (opcional: solo si usarás Gemini en la nube).
+3. Ejecuta la **Celda 3** para inicializar y **sincronizar automáticamente el código más reciente desde GitHub** (tarda 1 segundo, sin tener que resubir el notebook).
+4. Elige **Modo A (Interfaz Web Gradio)** en la Celda 4A o **Modo B (Formulario Colab)** en la Celda 4B.
 """
 
     cell_2_setup = """
@@ -126,25 +130,67 @@ else:
 """
 
     cell_4_unpack = f'''
-#@title 3. Inicializar paquete autocontenido acortador/
+#@title 3. Inicializar y sincronizar paquete acortador/
 import base64
 import json
+import shutil
+import subprocess
 import sys
 import zlib
 from pathlib import Path
 
-_PACKAGE_PAYLOAD = "{payload}"
+sincronizar_desde_github = True  #@param {{type:"boolean"}}
+_REPO_URL = "https://github.com/aleiwbyn/acortador.git"
+_REPO_DIR = Path("/content/acortador_repo")
 _TARGET_DIR = Path("/content/acortador")
-_TARGET_DIR.mkdir(parents=True, exist_ok=True)
+_PACKAGE_PAYLOAD = "{payload}"
 
-_decoded = json.loads(zlib.decompress(base64.b64decode(_PACKAGE_PAYLOAD)).decode("utf-8"))
-for _filename, _b64_content in _decoded.items():
-    (_TARGET_DIR / _filename).write_bytes(base64.b64decode(_b64_content))
+_TARGET_DIR.mkdir(parents=True, exist_ok=True)
+_synced_from_github = False
+
+if sincronizar_desde_github:
+    try:
+        if (_REPO_DIR / ".git").is_dir():
+            subprocess.run(
+                ["git", "-C", str(_REPO_DIR), "pull", "--ff-only"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            if _REPO_DIR.exists():
+                shutil.rmtree(_REPO_DIR)
+            subprocess.run(
+                ["git", "clone", "--depth", "1", _REPO_URL, str(_REPO_DIR)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        _src_pkg = _REPO_DIR / "acortador"
+        _src_files = sorted(_src_pkg.glob("*.py"))
+        if _src_files:
+            for _old in _TARGET_DIR.glob("*.py"):
+                _old.unlink()
+            for _py_file in _src_files:
+                shutil.copy2(_py_file, _TARGET_DIR / _py_file.name)
+            _synced_from_github = True
+            print(f"Código actualizado desde GitHub en {{_TARGET_DIR}} ({{len(_src_files)}} módulos).")
+    except Exception as _exc:
+        print(f"No se pudo sincronizar desde GitHub ({{_exc}}); usando copia embebida...")
+
+if not _synced_from_github:
+    _decoded = json.loads(zlib.decompress(base64.b64decode(_PACKAGE_PAYLOAD)).decode("utf-8"))
+    for _old in _TARGET_DIR.glob("*.py"):
+        _old.unlink()
+    for _filename, _b64_content in _decoded.items():
+        (_TARGET_DIR / _filename).write_bytes(base64.b64decode(_b64_content))
+    print(f"Motor acortador cargado desde copia embebida en {{_TARGET_DIR}} ({{len(_decoded)}} módulos).")
+
+for _mod in [k for k in list(sys.modules) if k == "acortador" or k.startswith("acortador.")]:
+    del sys.modules[_mod]
 
 if "/content" not in sys.path:
     sys.path.insert(0, "/content")
-
-print(f"Motor acortador listo en {{_TARGET_DIR}} ({{len(_decoded)}} módulos cargados).")
 '''
 
     cell_5_gradio = """
