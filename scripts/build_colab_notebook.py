@@ -1,0 +1,232 @@
+"""Genera el notebook autocontenido de Google Colab (colab/resumidor_video_ia.ipynb)."""
+
+from __future__ import annotations
+
+import base64
+import json
+import zlib
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_DIR = PROJECT_ROOT / "acortador"
+OUTPUT_NOTEBOOK = PROJECT_ROOT / "colab" / "resumidor_video_ia.ipynb"
+
+
+def _to_source_lines(text: str) -> list[str]:
+    lines = text.strip("\n").splitlines(keepends=True)
+    return lines if lines else [""]
+
+
+def _markdown_cell(cell_id: str, text: str) -> dict[str, Any]:
+    return {
+        "cell_type": "markdown",
+        "id": cell_id,
+        "metadata": {},
+        "source": _to_source_lines(text),
+    }
+
+
+def _code_cell(cell_id: str, code: str) -> dict[str, Any]:
+    return {
+        "cell_type": "code",
+        "id": cell_id,
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": _to_source_lines(code),
+    }
+
+
+def encode_package_payload(package_dir: Path = PACKAGE_DIR) -> str:
+    """Empaqueta los módulos Python de acortador/ en un blob zlib+base64."""
+    modules = sorted(package_dir.glob("*.py"), key=lambda p: p.name)
+    if not modules:
+        raise FileNotFoundError(f"No se encontraron archivos .py en {package_dir}")
+
+    raw_files = {
+        module.name: base64.b64encode(module.read_bytes()).decode("ascii")
+        for module in modules
+    }
+    compressed = zlib.compress(json.dumps(raw_files, sort_keys=True).encode("utf-8"), level=9)
+    return base64.b64encode(compressed).decode("ascii")
+
+
+def build_notebook_dict(package_dir: Path = PACKAGE_DIR) -> dict[str, Any]:
+    """Construye la estructura nbformat 4.5 completa para Google Colab."""
+    payload = encode_package_payload(package_dir)
+
+    cell_1_intro = """
+# Resumidor de Video con IA (máximo 10 minutos) — Google Drive + Google Colab
+
+Esta aplicación toma un **video fuente alojado en tu Google Drive**, lo analiza multimodalmente con **Gemini** (audio, discurso, texto en pantalla y escena visual), selecciona las **ideas principales** respetando un presupuesto estricto de **≤ 10 minutos (600 s)** y genera en tu Drive:
+
+- `<nombre>_resumen.mp4`: video resumido ensamblado con `ffmpeg`.
+- `<nombre>_resumen.md`: resumen ejecutivo, ideas principales y tabla de timestamps.
+- `<nombre>_resumen.srt`: subtítulos alineados a la nueva línea de tiempo.
+
+### Flujo de uso
+1. Ejecuta la **Celda 2** para montar Google Drive e instalar dependencias.
+2. Ejecuta la **Celda 3** para configurar tu `GEMINI_API_KEY` (recomendado: Secretos de Colab).
+3. Ejecuta la **Celda 4** para inicializar el motor `acortador/` en el entorno Colab.
+4. Elige **Modo A (Interfaz Web Gradio)** en la Celda 5 o **Modo B (Formulario Colab)** en la Celda 6.
+"""
+
+    cell_2_setup = """
+#@title 1. Montar Google Drive e instalar dependencias
+import shutil
+import subprocess
+from google.colab import drive
+
+drive.mount("/content/drive")
+
+subprocess.check_call(
+    [
+        "pip",
+        "install",
+        "-q",
+        "-U",
+        "faster-whisper>=1.0.0",
+        "av<18.0.0",
+        "google-genai>=3.2.0",
+        "pydantic>=2.0",
+        "gradio>=4.0",
+        "gdown>=5.0",
+    ]
+)
+
+if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+    print("Instalando ffmpeg...")
+    subprocess.check_call(["apt-get", "update", "-qq"])
+    subprocess.check_call(["apt-get", "install", "-y", "-qq", "ffmpeg"])
+
+print("Google Drive montado y dependencias listas.")
+"""
+
+    cell_3_apikey = """
+#@title 2. (Opcional) Configurar GEMINI_API_KEY solo si usas el modo Gemini
+import os
+
+api_key = ""
+try:
+    from google.colab import userdata
+
+    api_key = (userdata.get("GEMINI_API_KEY") or "").strip()
+except Exception:
+    api_key = ""
+
+if not api_key:
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+
+if api_key:
+    os.environ["GEMINI_API_KEY"] = api_key
+    print("GEMINI_API_KEY configurada. Podras usar tanto el modo Local como Gemini.")
+else:
+    print("Sin API Key: Se usara el motor Local (100% Gratis con Whisper + TextRank).")
+"""
+
+    cell_4_unpack = f'''
+#@title 3. Inicializar paquete autocontenido acortador/
+import base64
+import json
+import sys
+import zlib
+from pathlib import Path
+
+_PACKAGE_PAYLOAD = "{payload}"
+_TARGET_DIR = Path("/content/acortador")
+_TARGET_DIR.mkdir(parents=True, exist_ok=True)
+
+_decoded = json.loads(zlib.decompress(base64.b64decode(_PACKAGE_PAYLOAD)).decode("utf-8"))
+for _filename, _b64_content in _decoded.items():
+    (_TARGET_DIR / _filename).write_bytes(base64.b64decode(_b64_content))
+
+if "/content" not in sys.path:
+    sys.path.insert(0, "/content")
+
+print(f"Motor acortador listo en {{_TARGET_DIR}} ({{len(_decoded)}} módulos cargados).")
+'''
+
+    cell_5_gradio = """
+#@title 4A. Modo A — Aplicación Web Interactiva (Gradio)
+from acortador.ui import launch_app
+
+launch_app(share=True, default_drive_dir="/content/drive/MyDrive")
+"""
+
+    cell_6_form = """
+#@title 4B. Modo B — Ejecución directa con Formulario Colab
+from pathlib import Path
+from IPython.display import Markdown, Video, display
+from acortador import summarize_video
+
+video_fuente = "/content/drive/MyDrive/mi_video.mp4"  #@param {type:"string"}
+motor_ia = "local"  #@param ["local", "gemini"]
+carpeta_salida = ""  #@param {type:"string"}
+duracion_maxima_min = 10.0  #@param {type:"slider", min:1, max:10, step:0.5}
+modelo_gemini = "gemini-3.5-flash-lite"  #@param ["gemini-3.5-flash-lite", "gemini-4-argon", "gemini-4-hydrogen", "gemini-4-neon"]
+idioma = "es"  #@param ["es", "en", "pt", "fr"]
+enfoque_opcional = ""  #@param {type:"string"}
+
+resultado = summarize_video(
+    source=video_fuente,
+    output_dir=carpeta_salida.strip() or None,
+    max_duration_minutes=float(duracion_maxima_min),
+    engine=motor_ia,
+    model=modelo_gemini,
+    language=idioma,
+    focus_instructions=enfoque_opcional,
+    progress_callback=lambda msg: print(f"[acortador] {msg}"),
+)
+
+md_report = Path(resultado.summary_md_path).read_text(encoding="utf-8")
+display(Markdown(md_report))
+
+embed_preview = resultado.output_video_path.stat().st_size <= 50 * 1024 * 1024
+display(Video(str(resultado.output_video_path), embed=embed_preview))
+"""
+
+    return {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {
+            "colab": {
+                "name": OUTPUT_NOTEBOOK.name,
+                "provenance": [],
+            },
+            "kernelspec": {
+                "display_name": "Python 3",
+                "name": "python3",
+            },
+            "language_info": {
+                "name": "python",
+            },
+        },
+        "cells": [
+            _markdown_cell("intro", cell_1_intro),
+            _code_cell("setup_drive_deps", cell_2_setup),
+            _code_cell("setup_api_key", cell_3_apikey),
+            _code_cell("unpack_package", cell_4_unpack),
+            _code_cell("mode_a_gradio", cell_5_gradio),
+            _code_cell("mode_b_colab_form", cell_6_form),
+        ],
+    }
+
+
+def write_notebook(
+    output_path: Path = OUTPUT_NOTEBOOK,
+    package_dir: Path = PACKAGE_DIR,
+) -> Path:
+    """Genera y guarda el archivo .ipynb en disco."""
+    notebook = build_notebook_dict(package_dir=package_dir)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(notebook, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return output_path
+
+
+if __name__ == "__main__":
+    generated = write_notebook()
+    print(f"Notebook generado en: {generated}")
